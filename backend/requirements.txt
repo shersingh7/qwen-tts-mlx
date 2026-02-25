@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+python-multipart
+soundfile
+numpy
+mlx-audio

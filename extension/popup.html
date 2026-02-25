@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Qwen MLX TTS</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="hero">
+      <img src="icon.png" alt="TTS" class="hero-icon" />
+      <div>
+        <h1>Qwen MLX TTS</h1>
+        <p>Local. Fast. Mac-native.</p>
+      </div>
+    </header>
+
+    <section class="card">
+      <label for="voice">Voice</label>
+      <select id="voice">
+        <option value="" disabled selected>Loading voices…</option>
+      </select>
+
+      <label for="language">Language</label>
+      <select id="language">
+        <option value="Auto">Auto detect</option>
+        <option value="en">English</option>
+        <option value="zh">Chinese</option>
+        <option value="ja">Japanese</option>
+        <option value="ko">Korean</option>
+      </select>
+
+      <label for="speed">Speed <span id="speedValue">1.0x</span></label>
+      <input type="range" id="speed" min="0.5" max="3.0" step="0.1" value="1.0" />
+    </section>
+
+    <section class="card">
+      <label for="previewText">Preview text</label>
+      <textarea id="previewText" rows="3">Hello! Your MLX voice engine is ready. This text-to-speech runs entirely on your Mac.</textarea>
+      <button id="previewBtn">▶ Play preview</button>
+    </section>
+
+    <footer>
+      <div id="status" class="status disconnected">Checking local server…</div>
+      <div id="modelInfo" class="meta">—</div>
+    </footer>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>
