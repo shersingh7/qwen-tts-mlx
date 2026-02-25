@@ -1,5 +1,7 @@
 # Qwen3-TTS MLX Local Server
 
+> 🍎 **Apple Silicon Only** - This project uses MLX, which requires an M1/M2/M3/M4 Mac. Not compatible with Intel Macs, Windows, or Linux.
+
 Fast, local text-to-speech using Qwen3-TTS on Apple Silicon. Runs entirely on your Mac with no cloud API calls.
 
 ## Features
@@ -12,10 +14,12 @@ Fast, local text-to-speech using Qwen3-TTS on Apple Silicon. Runs entirely on yo
 
 ## Requirements
 
-- Mac with Apple Silicon (M1/M2/M3/M4)
+- **Mac with Apple Silicon (M1/M2/M3/M4)** - This project uses MLX, which is optimized for Apple Silicon. It will NOT work on Intel Macs or Windows/Linux.
 - macOS 14.0+ (Sonoma or later)
 - Python 3.12
 - ~4GB disk space for the model
+
+> ⚠️ **Note:** This project uses Apple's MLX framework, which is exclusive to Apple Silicon. If you're on an Intel Mac or another platform, this won't work.
 
 ## Quick Start
 
