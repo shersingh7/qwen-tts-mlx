@@ -90,6 +90,47 @@ async function handleServerStatus(sendResponse) {
   }
 }
 
+async function autoStartServer() {
+  try {
+    console.log("[Qwen TTS Background] Auto-starting server...");
+    const response = await sendNativeMessage("start");
+    return { success: response?.success ?? true };
+  } catch (error) {
+    console.error("[Qwen TTS Background] Auto-start failed:", error);
+    return { success: false, error: error.message };
+  }
+}
+
+async function waitForServerReady(timeoutMs = 30000) {
+  const startTime = Date.now();
+  console.log("[Qwen TTS Background] Waiting for server to be ready...");
+
+  while (Date.now() - startTime < timeoutMs) {
+    try {
+      const response = await fetch(`${SERVER_URL}/health`, {
+        method: "GET",
+        signal: AbortSignal.timeout(2000),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.model_loaded) {
+          console.log("[Qwen TTS Background] Server is ready!");
+          return true;
+        }
+      }
+    } catch {
+      // Server not ready yet, continue polling
+    }
+
+    // Wait 500ms before retrying
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
+  console.error("[Qwen TTS Background] Server ready check timed out");
+  return false;
+}
+
 async function fetchJson(path, options = {}) {
   const response = await fetch(`${SERVER_URL}${path}`, options);
   const maybeJson = await response.json().catch(() => ({}));
@@ -129,12 +170,29 @@ async function handleTTSRequest(request, sendResponse) {
     }).catch(() => null);
 
     if (!healthCheck || !healthCheck.ok) {
-      sendResponse({
-        success: false,
-        error: "Server not running. Start with: cd ~/github/qwen-tts-mlx/backend && ./venv/bin/python server.py",
-        serverDown: true,
-      });
-      return;
+      // Try to start the server automatically
+      const startResult = await autoStartServer();
+
+      if (!startResult.success) {
+        sendResponse({
+          success: false,
+          error: `Failed to start server: ${startResult.error}`,
+          serverDown: true,
+        });
+        return;
+      }
+
+      // Wait for server to be ready (30 second timeout)
+      const ready = await waitForServerReady(30000);
+
+      if (!ready) {
+        sendResponse({
+          success: false,
+          error: "Server start timed out. Try starting manually.",
+          serverDown: true,
+        });
+        return;
+      }
     }
 
     console.log("[Qwen TTS Background] Sending to server - voice:", request.voice);
