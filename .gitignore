@@ -57,3 +57,5 @@ models/
 
 # LaunchAgent plist (user-specific)
 *.plist
+# Server PID file
+.server.pid
