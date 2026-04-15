@@ -1,0 +1,9 @@
+{
+  "name": "com.open_tts.native_host",
+  "description": "Native Messaging Host for Open TTS - manages the local TTS server",
+  "path": "__PATH__",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://__EXTENSION_ID__/"
+  ]
+}

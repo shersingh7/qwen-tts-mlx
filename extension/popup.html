@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Qwen MLX TTS</title>
+  <title>Open TTS</title>
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
@@ -11,8 +11,8 @@
     <header class="hero">
       <img src="icon.png" alt="TTS" class="hero-icon" />
       <div>
-        <h1>Qwen MLX TTS</h1>
-        <p>Local. Fast. Mac-native.</p>
+        <h1>Open TTS</h1>
+        <p>Local. Multi-model. Mac-native.</p>
       </div>
     </header>
 
@@ -25,9 +25,14 @@
     </section>
 
     <section class="card">
+      <label for="model">Model</label>
+      <select id="model">
+        <option value="" disabled selected>Loading models…</option>
+      </select>
+
       <label for="voice">Voice</label>
       <select id="voice">
-        <option value="" disabled selected>Loading voices…</option>
+        <option value="" disabled selected>Select model first</option>
       </select>
 
       <label for="language">Language</label>
@@ -45,7 +50,7 @@
 
     <section class="card">
       <label for="previewText">Preview text</label>
-      <textarea id="previewText" rows="3">Hello! Your MLX voice engine is ready. This text-to-speech runs entirely on your Mac.</textarea>
+      <textarea id="previewText" rows="3">Hello! Open TTS is ready. Multiple local models running entirely on your Mac.</textarea>
       <button id="previewBtn">▶ Play preview</button>
     </section>
 

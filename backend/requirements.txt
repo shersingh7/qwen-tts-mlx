@@ -3,4 +3,5 @@ uvicorn
 python-multipart
 soundfile
 numpy
-mlx-audio
+mlx-audio>=0.4.2
+huggingface_hub

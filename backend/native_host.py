@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Native Messaging Host for Qwen3-TTS MLX extension.
+Native Messaging Host for Open TTS extension.
 Handles start/stop server commands from the Chrome extension.
 """
 

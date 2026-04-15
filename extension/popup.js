@@ -9,15 +9,18 @@ const previewBtn = document.getElementById("previewBtn");
 const startServerBtn = document.getElementById("startServerBtn");
 const stopServerBtn = document.getElementById("stopServerBtn");
 const serverStatus = document.getElementById("serverStatus");
+const modelSelect = document.getElementById("model");
 
 const DEFAULTS = {
+  model: "qwen3-tts",
   voice: "ryan",
   speed: 1.0,
   language: "Auto",
-  previewText: "Hello! Your MLX voice engine is ready. This text-to-speech runs entirely on your Mac.",
+  previewText: "Hello! Open TTS is ready. Multiple local models running entirely on your Mac.",
 };
 
 let currentPreviewAudio = null;
+let currentModelId = null;
 
 function setStatus(connected, text) {
   statusDiv.textContent = text;
@@ -25,7 +28,6 @@ function setStatus(connected, text) {
 }
 
 function setServerUI(state, message) {
-  // Update buttons
   if (state === "running") {
     startServerBtn.disabled = true;
     stopServerBtn.disabled = false;
@@ -33,12 +35,9 @@ function setServerUI(state, message) {
     startServerBtn.disabled = false;
     stopServerBtn.disabled = true;
   } else {
-    // starting or stopping
     startServerBtn.disabled = true;
     stopServerBtn.disabled = true;
   }
-
-  // Update status text
   serverStatus.textContent = message;
   serverStatus.className = `server-status ${state}`;
 }
@@ -66,15 +65,11 @@ function runtimeMessage(payload) {
 
 async function handleStartServer() {
   setServerUI("starting", "Starting server...");
-
   try {
     const response = await runtimeMessage({ type: "START_SERVER" });
-
     if (response?.success) {
-      // Wait a bit for the server to fully start
       await new Promise((r) => setTimeout(r, 2000));
-      // Refresh health and voices
-      await Promise.all([refreshHealth(), loadVoices()]);
+      await Promise.all([refreshHealth(), loadModels()]);
       setServerUI("running", "Server running");
     } else {
       setServerUI("error", response?.error || "Failed to start");
@@ -86,15 +81,14 @@ async function handleStartServer() {
 
 async function handleStopServer() {
   setServerUI("starting", "Stopping server...");
-
   try {
     const response = await runtimeMessage({ type: "STOP_SERVER" });
-
     if (response?.success) {
       setServerUI("stopped", "Server stopped");
       setStatus(false, "Server stopped");
       modelInfo.textContent = "Start server to use TTS";
       voiceSelect.innerHTML = "<option disabled selected>Start server first</option>";
+      modelSelect.innerHTML = "<option disabled selected>Start server first</option>";
     } else {
       setServerUI("error", response?.error || "Failed to stop");
     }
@@ -113,13 +107,12 @@ async function checkServerStatus() {
   } catch (error) {
     // Server not reachable
   }
-
   setServerUI("stopped", "Server not running");
   return false;
 }
 
 async function loadSettings() {
-  const data = await storageGet(["voice", "speed", "language", "previewText"]);
+  const data = await storageGet(["model", "voice", "speed", "language", "previewText"]);
 
   const speed = Number(data.speed ?? DEFAULTS.speed);
   speedInput.value = speed.toFixed(1);
@@ -127,6 +120,7 @@ async function loadSettings() {
 
   languageSelect.value = data.language || DEFAULTS.language;
   previewText.value = data.previewText || DEFAULTS.previewText;
+  currentModelId = data.model || DEFAULTS.model;
 }
 
 function wireEvents() {
@@ -148,13 +142,82 @@ function wireEvents() {
     await storageSet({ previewText: previewText.value });
   });
 
+  modelSelect.addEventListener("change", async () => {
+    const selectedModel = modelSelect.value;
+    currentModelId = selectedModel;
+    await storageSet({ model: selectedModel });
+
+    // Switch model on server
+    setServerUI("starting", `Switching to ${modelSelect.options[modelSelect.selectedIndex].text}...`);
+    try {
+      const response = await runtimeMessage({ type: "LOAD_MODEL", modelId: selectedModel });
+      if (response?.success) {
+        // Reload voices for new model
+        await loadVoices(selectedModel);
+        setServerUI("running", "Server running");
+
+        // Update language dropdown visibility based on model
+        updateLanguageVisibility(selectedModel);
+      } else {
+        setServerUI("error", response?.error || "Failed to switch model");
+      }
+    } catch (error) {
+      setServerUI("error", `Error switching: ${error.message}`);
+    }
+  });
+
   previewBtn.addEventListener("click", handlePreview);
   startServerBtn.addEventListener("click", handleStartServer);
   stopServerBtn.addEventListener("click", handleStopServer);
 }
 
-async function loadVoices() {
-  const response = await runtimeMessage({ type: "GET_VOICES" });
+function updateLanguageVisibility(modelId) {
+  // Fish S2 Pro doesn't use lang_code — hide language selector
+  // We'll disable it rather than hide for cleaner UX
+  const langSection = languageSelect.closest("label");
+  if (modelId === "fish-s2-pro") {
+    languageSelect.disabled = true;
+    languageSelect.value = "Auto";
+  } else {
+    languageSelect.disabled = false;
+  }
+}
+
+async function loadModels() {
+  const response = await runtimeMessage({ type: "GET_MODELS" });
+  if (!response?.success) {
+    throw new Error(response?.error || "Unable to load models");
+  }
+
+  const data = response.data;
+  const saved = await storageGet(["model"]);
+  const preferred = saved.model || DEFAULTS.model;
+
+  modelSelect.innerHTML = "";
+  data.models.forEach((m) => {
+    const option = document.createElement("option");
+    option.value = m.id;
+    option.textContent = `${m.name}${m.active ? " ●" : ""}`;
+    if (m.id === preferred) option.selected = true;
+    modelSelect.appendChild(option);
+  });
+
+  if (!modelSelect.value && data.models.length > 0) {
+    // Auto-select the active model
+    const active = data.models.find((m) => m.active);
+    modelSelect.value = active ? active.id : data.models[0].id;
+  }
+
+  currentModelId = modelSelect.value;
+  await storageSet({ model: modelSelect.value });
+
+  // Load voices for the selected model
+  await loadVoices(modelSelect.value);
+  updateLanguageVisibility(modelSelect.value);
+}
+
+async function loadVoices(modelId) {
+  const response = await runtimeMessage({ type: "GET_VOICES", modelId });
   if (!response?.success) {
     throw new Error(response?.error || "Unable to load voices");
   }
@@ -181,7 +244,6 @@ async function loadVoices() {
 
 async function refreshHealth() {
   const response = await runtimeMessage({ type: "GET_HEALTH" });
-
   if (!response?.success) {
     throw new Error(response?.error || "Health check failed");
   }
@@ -193,8 +255,9 @@ async function refreshHealth() {
     return;
   }
 
-  setStatus(true, "Connected to local MLX server");
+  setStatus(true, "Connected to local TTS server");
   modelInfo.textContent = `Model: ${health.model}`;
+  currentModelId = health.model;
 }
 
 async function handlePreview() {
@@ -221,6 +284,7 @@ async function handlePreview() {
       voice: voiceSelect.value,
       speed: 1.0,
       language: languageSelect.value,
+      model: modelSelect.value,
     });
 
     if (!response?.success) {
@@ -232,7 +296,7 @@ async function handlePreview() {
     await currentPreviewAudio.play();
 
     setStatus(true, "Preview playing");
-    currentPreviewAudio.onended = () => setStatus(true, "Connected to local MLX server");
+    currentPreviewAudio.onended = () => setStatus(true, "Connected to local TTS server");
   } catch (error) {
     setStatus(false, `Preview failed: ${error.message}`);
   } finally {
@@ -246,20 +310,21 @@ async function init() {
     await loadSettings();
     wireEvents();
 
-    // Check server status
     const serverRunning = await checkServerStatus();
 
     if (serverRunning) {
-      await Promise.all([refreshHealth(), loadVoices()]);
+      await Promise.all([refreshHealth(), loadModels()]);
     } else {
       setStatus(false, "Server not running");
       modelInfo.textContent = "Click 'Start Server' to begin";
       voiceSelect.innerHTML = "<option disabled selected>Start server first</option>";
+      modelSelect.innerHTML = "<option disabled selected>Start server first</option>";
     }
   } catch (error) {
     setStatus(false, `Error: ${error.message}`);
     modelInfo.textContent = "Check server at 127.0.0.1:8000";
     voiceSelect.innerHTML = "<option disabled selected>Server unavailable</option>";
+    modelSelect.innerHTML = "<option disabled selected>Server unavailable</option>";
     setServerUI("stopped", "Server not running");
   }
 }

@@ -1,5 +1,5 @@
 const SERVER_URL = "http://127.0.0.1:8000";
-const NATIVE_HOST_NAME = "com.qwen_tts_mlx.native_host";
+const NATIVE_HOST_NAME = "com.open_tts.native_host";
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === "TTS_REQUEST") {
@@ -8,7 +8,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.type === "GET_VOICES") {
-    handleGetVoices(sendResponse);
+    handleGetVoices(request, sendResponse);
+    return true;
+  }
+
+  if (request.type === "GET_MODELS") {
+    handleGetModels(sendResponse);
+    return true;
+  }
+
+  if (request.type === "LOAD_MODEL") {
+    handleLoadModel(request, sendResponse);
     return true;
   }
 
@@ -55,7 +65,7 @@ async function handleStartServer(sendResponse) {
     const response = await sendNativeMessage("start");
     sendResponse({ success: response?.success ?? true, message: response?.message });
   } catch (error) {
-    console.error("[Qwen TTS Background] Start server error:", error);
+    console.error("[Open TTS Background] Start server error:", error);
     sendResponse({
       success: false,
       error: `Native messaging error: ${error.message}. Make sure the native host is installed (run install_native_host.sh)`,
@@ -68,7 +78,7 @@ async function handleStopServer(sendResponse) {
     const response = await sendNativeMessage("stop");
     sendResponse({ success: response?.success ?? true, message: response?.message });
   } catch (error) {
-    console.error("[Qwen TTS Background] Stop server error:", error);
+    console.error("[Open TTS Background] Stop server error:", error);
     sendResponse({
       success: false,
       error: `Native messaging error: ${error.message}. Make sure the native host is installed (run install_native_host.sh)`,
@@ -85,25 +95,25 @@ async function handleServerStatus(sendResponse) {
       pid: response?.pid,
     });
   } catch (error) {
-    console.error("[Qwen TTS Background] Server status error:", error);
+    console.error("[Open TTS Background] Server status error:", error);
     sendResponse({ success: false, running: false });
   }
 }
 
 async function autoStartServer() {
   try {
-    console.log("[Qwen TTS Background] Auto-starting server...");
+    console.log("[Open TTS Background] Auto-starting server...");
     const response = await sendNativeMessage("start");
     return { success: response?.success ?? true };
   } catch (error) {
-    console.error("[Qwen TTS Background] Auto-start failed:", error);
+    console.error("[Open TTS Background] Auto-start failed:", error);
     return { success: false, error: error.message };
   }
 }
 
 async function waitForServerReady(timeoutMs = 30000) {
   const startTime = Date.now();
-  console.log("[Qwen TTS Background] Waiting for server to be ready...");
+  console.log("[Open TTS Background] Waiting for server to be ready...");
 
   while (Date.now() - startTime < timeoutMs) {
     try {
@@ -115,7 +125,7 @@ async function waitForServerReady(timeoutMs = 30000) {
       if (response.ok) {
         const data = await response.json();
         if (data.model_loaded) {
-          console.log("[Qwen TTS Background] Server is ready!");
+          console.log("[Open TTS Background] Server is ready!");
           return true;
         }
       }
@@ -123,11 +133,10 @@ async function waitForServerReady(timeoutMs = 30000) {
       // Server not ready yet, continue polling
     }
 
-    // Wait 500ms before retrying
     await new Promise((r) => setTimeout(r, 500));
   }
 
-  console.error("[Qwen TTS Background] Server ready check timed out");
+  console.error("[Open TTS Background] Server ready check timed out");
   return false;
 }
 
@@ -152,7 +161,28 @@ async function handleHealth(sendResponse) {
   }
 }
 
-async function handleGetVoices(sendResponse) {
+async function handleGetModels(sendResponse) {
+  try {
+    const data = await fetchJson("/v1/models");
+    sendResponse({ success: true, data });
+  } catch (error) {
+    sendResponse({ success: false, error: error.message });
+  }
+}
+
+async function handleLoadModel(request, sendResponse) {
+  try {
+    const modelId = request.modelId || "qwen3-tts";
+    const data = await fetchJson(`/v1/load-model?model_id=${encodeURIComponent(modelId)}`, {
+      method: "POST",
+    });
+    sendResponse({ success: true, data });
+  } catch (error) {
+    sendResponse({ success: false, error: error.message });
+  }
+}
+
+async function handleGetVoices(request, sendResponse) {
   try {
     const data = await fetchJson("/v1/voices");
     sendResponse({ success: true, data });
@@ -170,7 +200,6 @@ async function handleTTSRequest(request, sendResponse) {
     }).catch(() => null);
 
     if (!healthCheck || !healthCheck.ok) {
-      // Try to start the server automatically
       const startResult = await autoStartServer();
 
       if (!startResult.success) {
@@ -182,7 +211,6 @@ async function handleTTSRequest(request, sendResponse) {
         return;
       }
 
-      // Wait for server to be ready (30 second timeout)
       const ready = await waitForServerReady(30000);
 
       if (!ready) {
@@ -195,18 +223,25 @@ async function handleTTSRequest(request, sendResponse) {
       }
     }
 
-    console.log("[Qwen TTS Background] Sending to server - voice:", request.voice);
+    console.log("[Open TTS Background] Sending to server - model:", request.model, "voice:", request.voice);
 
-    // Increased timeout for longer texts (5 minutes)
+    // Build request body — include model selection
+    const body = {
+      text: request.text,
+      voice: request.voice,
+      speed: request.speed,
+      language: request.language || "Auto",
+    };
+
+    // Only include model param if explicitly set
+    if (request.model) {
+      body.model = request.model;
+    }
+
     const response = await fetch(`${SERVER_URL}/v1/synthesize`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        text: request.text,
-        voice: request.voice,
-        speed: request.speed,
-        language: request.language || "Auto",
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(300000), // 5 minutes timeout
     });
 
@@ -225,7 +260,7 @@ async function handleTTSRequest(request, sendResponse) {
       sendResponse({ success: false, error: "Failed to read audio data" });
     };
   } catch (error) {
-    console.error("[Qwen TTS Background] Error:", error);
+    console.error("[Open TTS Background] Error:", error);
     sendResponse({ success: false, error: error.message });
   }
 }

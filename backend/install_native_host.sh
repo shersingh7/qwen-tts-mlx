@@ -2,11 +2,11 @@
 # Install the native messaging host for Chrome/Chromium
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-NATIVE_HOST_NAME="com.qwen_tts_mlx.native_host"
+NATIVE_HOST_NAME="com.open_tts.native_host"
 NATIVE_HOST_SCRIPT="$SCRIPT_DIR/native_host.py"
-MANIFEST_TEMPLATE="$SCRIPT_DIR/com.qwen_tts_mlx.native_host.json"
+MANIFEST_TEMPLATE="$SCRIPT_DIR/com.open_tts.native_host.json"
 
-echo "=== Qwen3-TTS MLX Native Host Installer ==="
+echo "=== Open TTS Native Host Installer ==="
 echo ""
 
 # Get extension ID from user
@@ -43,6 +43,13 @@ MANIFEST_CONTENT=$(cat "$MANIFEST_TEMPLATE" | \
 
 MANIFEST_DEST="$HOST_DIR/$NATIVE_HOST_NAME.json"
 echo "$MANIFEST_CONTENT" > "$MANIFEST_DEST"
+
+# Remove old native host if present
+OLD_HOST="$HOST_DIR/com.qwen_tts_mlx.native_host.json"
+if [ -f "$OLD_HOST" ]; then
+    rm "$OLD_HOST"
+    echo "✓ Removed old Qwen3-TTS native host manifest"
+fi
 
 echo ""
 echo "✓ Native messaging host manifest created at:"

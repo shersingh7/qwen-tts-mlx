@@ -246,7 +246,8 @@ class AudioBufferQueue {
 }
 
 async function requestChunkAudio(text, settings) {
-  console.log("[Qwen TTS] Requesting audio:", {
+  console.log("[Open TTS] Requesting audio:", {
+    model: settings.model || "qwen3-tts",
     voice: settings.voice || "ryan",
     textLength: text.length,
   });
@@ -257,6 +258,7 @@ async function requestChunkAudio(text, settings) {
     voice: settings.voice || "ryan",
     speed: 1.0,
     language: settings.language || "Auto",
+    model: settings.model || "qwen3-tts",
   });
 
   if (!response?.success) {
@@ -349,7 +351,7 @@ async function onSpeakClick(event) {
   try {
     setBusy(true, "Preparing…");
 
-    const settings = await chrome.storage.sync.get(["voice", "speed", "language"]);
+    const settings = await chrome.storage.sync.get(["voice", "speed", "language", "model"]);
     const playbackRate = Number(settings.speed) || 1.0;
 
     console.log("[Qwen TTS] Settings from storage:", settings);

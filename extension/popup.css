@@ -211,3 +211,12 @@ button:disabled {
 .server-status.starting {
   color: #d97706;
 }
+
+/* Model selector */
+#model {
+  font-weight: 600;
+}
+
+#model option {
+  font-weight: 400;
+}
