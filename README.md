@@ -90,7 +90,7 @@ source venv/bin/activate
 python server.py
 ```
 
-The server will start at `http://127.0.0.1:5020`
+The server will start at `http://127.0.0.1:8000`
 
 </details>
 
@@ -127,13 +127,13 @@ To uninstall:
 ### Example: List Models
 
 ```bash
-curl http://127.0.0.1:5020/v1/models
+curl http://127.0.0.1:8000/v1/models
 ```
 
 ### Example: Swap Model
 
 ```bash
-curl -X POST http://127.0.0.1:5020/v1/load-model \
+curl -X POST http://127.0.0.1:8000/v1/load-model \
   -H "Content-Type: application/json" \
   -d '{"model": "fish-s2-pro"}'
 ```
@@ -142,13 +142,13 @@ curl -X POST http://127.0.0.1:5020/v1/load-model \
 
 ```bash
 # Qwen3-TTS with preset voice
-curl -X POST http://127.0.0.1:5020/v1/synthesize \
+curl -X POST http://127.0.0.1:8000/v1/synthesize \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello, this is a test.", "model": "qwen3-tts", "voice": "ryan", "speed": 1.0}' \
   --output output.wav
 
 # Fish S2 Pro with SSML voice
-curl -X POST http://127.0.0.1:5020/v1/synthesize \
+curl -X POST http://127.0.0.1:8000/v1/synthesize \
   -H "Content-Type: application/json" \
   -d '{"text": "Hello, this is a test.", "model": "fish-s2-pro", "voice": "default"}' \
   --output output.wav
@@ -162,7 +162,7 @@ Environment variables:
 |----------|---------|-------------|
 | `OPEN_TTS_DEFAULT_MODEL` | `qwen3-tts` | Model to load at startup |
 | `OPEN_TTS_HOST` | `127.0.0.1` | Server host |
-| `OPEN_TTS_PORT` | `5020` | Server port |
+| `OPEN_TTS_PORT` | `8000` | Server port |
 
 ## Project Structure
 
@@ -202,7 +202,7 @@ For the Start/Stop Server feature:
 ### Server won't start
 ```bash
 # Check if port is in use
-lsof -i :5020
+lsof -i :8000
 
 # Kill existing process
 kill -9 <PID>
@@ -225,7 +225,7 @@ If you see "Native messaging error" when clicking Start/Stop:
 
 ### Extension shows "Disconnected"
 - Make sure the server is running
-- Check `http://127.0.0.1:5020/health` in browser
+- Check `http://127.0.0.1:8000/health` in browser
 
 ## Credits
 
