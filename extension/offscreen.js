@@ -1,22 +1,23 @@
-// Open TTS — Offscreen Document (v2.1)
+// Open TTS — Offscreen Document (v2.2)
 // Runs at chrome-extension:// origin = autoplay always allowed.
-// Handles full synthesis + Web Audio playback so the service
-// worker and content script stay thin and disposable.
+// Handles full synthesis + Web Audio playback.
+// Speed is applied at synthesis time by the server — we do NOT re-apply
+// playbackRate to avoid double-speed (X^2) effect.
 // ──────────────────────────────────────────────────────────────
 
-const SERVER_URL     = "http://127.0.0.1:8000";
-const CHUNK_TARGET   = 4000;
-const AUDIO_LEAD     = 0.05;
-const MAX_TIMEOUT    = 300000;
+const SERVER_URL = "http://127.0.0.1:8000";
+const CHUNK_TARGET = 4000;
+const AUDIO_LEAD = 0.05;
+const MAX_TIMEOUT = 300000;
 
-let audioCtx         = null;
-let nextStartTime    = 0;
-let activeSources    = new Set();
-let scheduledCount   = 0;
-let endedCount       = 0;
-let abortCtl         = null;
-let isSpeaking       = false;
-let isPaused         = false;
+let audioCtx = null;
+let nextStartTime = 0;
+let activeSources = new Set();
+let scheduledCount = 0;
+let endedCount = 0;
+let abortCtl = null;
+let isSpeaking = false;
+let isPaused = false;
 
 // ───── Audio helpers ──────────────────────────────────────────
 
@@ -33,7 +34,7 @@ function closeAudio() {
   for (const s of activeSources) { try { s.stop(0); } catch (_) {} }
   activeSources.clear();
   scheduledCount = 0;
-  endedCount     = 0;
+  endedCount = 0;
   if (audioCtx && audioCtx.state !== "closed") {
     audioCtx.close().catch(() => {});
     audioCtx = null;
@@ -43,9 +44,9 @@ function closeAudio() {
 
 // ───── Notify background (→ content.js) ──────────────────────
 
-function status(label)  { chrome.runtime.sendMessage({ type: "TTS_STATUS", label }); }
-function done()         { chrome.runtime.sendMessage({ type: "TTS_DONE" }); }
-function errMsg(message) { chrome.runtime.sendMessage({ type: "TTS_ERROR", message }); }
+function status(label) { chrome.runtime.sendMessage({ type: "TTS_STATUS", label }).catch(() => {}); }
+function done() { chrome.runtime.sendMessage({ type: "TTS_DONE" }).catch(() => {}); }
+function errMsg(message) { chrome.runtime.sendMessage({ type: "TTS_ERROR", message }).catch(() => {}); }
 
 // ───── Text chunking ─────────────────────────────────────────
 
@@ -130,22 +131,25 @@ async function decodeChunk(b64) {
   return getAudioContext().decodeAudioData(bytes.buffer.slice(0));
 }
 
-function scheduleBuffers(bufs, rate) {
+function scheduleBuffers(bufs) {
+  // Server already applies speed during synthesis. Play at 1.0x to avoid double-speed.
+  const playbackRate = 1.0;
   const ctx = getAudioContext();
   if (ctx.state === "suspended") ctx.resume();
 
   nextStartTime = Math.max(nextStartTime, ctx.currentTime) + AUDIO_LEAD;
   scheduledCount = 0;
-  endedCount     = 0;
+  endedCount = 0;
 
   for (let i = 0; i < bufs.length; i++) {
-    const buf = bufs[i]; if (!buf) continue;
+    const buf = bufs[i];
+    if (!buf) continue;
     const src = ctx.createBufferSource();
     src.buffer = buf;
-    src.playbackRate.value = rate;
+    src.playbackRate.value = playbackRate;
     src.connect(ctx.destination);
     src.start(nextStartTime);
-    nextStartTime += buf.duration / rate;
+    nextStartTime += buf.duration / playbackRate;
     activeSources.add(src);
     scheduledCount++;
 
@@ -164,7 +168,8 @@ function scheduleBuffers(bufs, rate) {
 // ───── Main pipeline ──────────────────────────────────────────
 
 async function doSpeak(text, settings) {
-  isSpeaking = true; isPaused = false;
+  isSpeaking = true;
+  isPaused = false;
   closeAudio();
   abortCtl = new AbortController();
 
@@ -197,7 +202,7 @@ async function doSpeak(text, settings) {
     if (!bufs.length) throw new Error("No playable audio generated");
 
     status(bufs.length > 1 ? `Reading 1/${bufs.length}... tap to stop` : "Reading... tap to stop");
-    scheduleBuffers(bufs, Number(settings.speed) || 1.0);
+    scheduleBuffers(bufs);
 
   } catch (err) {
     if (err.name === "AbortError") { done(); return; }
@@ -237,9 +242,3 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     return true;
   }
 });
-
-// ───── Auto-close idle offscreen document (MV3 requirement) ───
-// Chrome allows offscreen docs with AUDIO_PLAYBACK reason only when
-// actively playing audio. If idle for too long, we close ourselves.
-// Since offscreen docs take negligible resources, we just idle.
-// If Chrome kills us mid-replay, content.js can reopen us on next SPEAK.

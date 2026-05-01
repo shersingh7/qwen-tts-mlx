@@ -529,6 +529,9 @@ async function loadModels() {
   }
 
   const data = response.data;
+  // Cache for loadVoices() — eliminates redundant GET_MODELS roundtrip
+  _cachedModelsData = response;
+
   const saved = await storageGet(["model"]);
   const preferred = saved.model || DEFAULTS.model;
 
@@ -550,8 +553,15 @@ async function loadModels() {
   }
 }
 
+// loadVoices: populates voice dropdown without an extra network fetch.
+// Reuses model data from loadModels() via a local cache.
+let _cachedModelsData = null;
+
 async function loadVoices(modelId) {
-  const modelsResponse = await runtimeMessage({ type: "GET_MODELS" });
+  // Use cached models data if available — avoids redundant GET_MODELS roundtrip
+  const modelsResponse = _cachedModelsData || await runtimeMessage({ type: "GET_MODELS" });
+  if (!_cachedModelsData) _cachedModelsData = modelsResponse;
+
   const modelData = modelsResponse?.data?.models?.find((m) => m.id === modelId);
 
   const saved = await storageGet(["voice"]);
@@ -644,8 +654,8 @@ async function handlePreview(skipHistory = false) {
     if (response?.success) {
       const dataUrl = response.audioData;
       currentPreviewAudio = new Audio(dataUrl);
-      currentPreviewAudio.playbackRate = Number(settings.speed) || 1.0;
-      currentPreviewAudio.preservesPitch = true;
+      // Speed is applied at synthesis time by the server — don't double-apply playbackRate
+      currentPreviewAudio.playbackRate = 1.0;
 
       generationCounter++;
       genCountEl.textContent = `GEN: ${String(generationCounter).padStart(3, "0")}`;

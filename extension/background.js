@@ -1,4 +1,4 @@
-const SERVER_URL     = "http://127.0.0.1:8000";
+const SERVER_URL = "http://127.0.0.1:8000";
 const NATIVE_HOST_NAME = "com.open_tts.native_host";
 
 // ── Server-known-running cache ───────────────────────────────────
@@ -34,24 +34,76 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
+// ── Offscreen document lifecycle ─────────────────────────────────
+// ONLY the background service worker can use chrome.offscreen API.
+// Content scripts delegate to us via ENSURE_OFFSCREEN / SPEAK / etc.
+
+let _offscreenReady = false;
+
+async function ensureOffscreenDoc() {
+  if (_offscreenReady) return true;
+
+  const existing = await chrome.offscreen.hasDocument?.().catch(() => null);
+  if (existing) {
+    _offscreenReady = true;
+    return true;
+  }
+
+  try {
+    await chrome.offscreen.createDocument({
+      url: chrome.runtime.getURL("offscreen.html"),
+      reasons: ["AUDIO_PLAYBACK"],
+      justification: "Local text-to-speech audio playback",
+    });
+    _offscreenReady = true;
+    return true;
+  } catch (e) {
+    if (e.message?.includes("offscreen") || e.message?.includes("already")) {
+      _offscreenReady = true;
+      return true;
+    }
+    console.error("[Open TTS] Failed to create offscreen doc:", e);
+    return false;
+  }
+}
+
+// Forward a message to the offscreen document
+async function sendToOffscreen(payload) {
+  const ok = await ensureOffscreenDoc();
+  if (!ok) throw new Error("Offscreen document not available");
+  return chrome.runtime.sendMessage(payload);
+}
+
 // ── Message handler ─────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   const type = request.type;
 
-  // SPEAK / STOP / PAUSE / RESUME are handled directly by offscreen.js
-  // so we pass them through when they originate from content.js.
-  if (["SPEAK","STOP","PAUSE","RESUME"].includes(type)) {
-    // Forward to offscreen document (all extension contexts get the broadcast,
-    // but offscreen.js is the only one that actually handles these types.)
-    // We still need to return true so content.js's await doesn't hang.
-    chrome.runtime.sendMessage(request).then(sendResponse).catch(() => sendResponse({}));
+  // SPEAK / STOP / PAUSE / RESUME — route through offscreen doc.
+  // Content scripts send these; background creates offscreen doc
+  // and forwards. We handle the lifecycle HERE, not in content.js.
+  if (["SPEAK", "STOP", "PAUSE", "RESUME"].includes(type)) {
+    sendToOffscreen(request)
+      .then((resp) => sendResponse(resp || { started: true }))
+      .catch((e) => sendResponse({ error: e.message }));
     return true;
   }
 
+  // Popup requested global stop — tell offscreen + all content tabs
   if (type === "STOP_TTS") {
-    // Popup requested stop — tell offscreen to stop, content to clean up
-    chrome.runtime.sendMessage({ type: "STOP" }).catch(() => {});
+    sendToOffscreen({ type: "STOP" }).catch(() => {});
+    // Also notify content scripts in all tabs
+    chrome.tabs.query({}).then((tabs) => {
+      for (const tab of tabs) {
+        chrome.tabs.sendMessage(tab.id, { type: "STOP_TTS" }).catch(() => {});
+      }
+    }).catch(() => {});
     sendResponse({ stopped: true });
+    return true;
+  }
+
+  // Content script asking us to ensure offscreen exists
+  if (type === "ENSURE_OFFSCREEN") {
+    ensureOffscreenDoc().then((ok) => sendResponse({ success: ok })).catch(() => sendResponse({ success: false }));
     return true;
   }
 
@@ -76,7 +128,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
   if (type === "ENSURE_SERVER") {
-    ensureServerRunning().then(ok => sendResponse({ success: ok })).catch(() => sendResponse({ success: false }));
+    ensureServerRunning().then((ok) => sendResponse({ success: ok })).catch(() => sendResponse({ success: false }));
     return true;
   }
   if (type === "START_SERVER") {
