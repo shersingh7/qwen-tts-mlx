@@ -457,7 +457,7 @@ def _synthesize_batch_sync(model, base_kwargs, texts, model_id, voice, lang_code
     """Generate multiple texts under a SINGLE gpu_lock acquisition.
     Returns list of {index, audio_b64, mime_type, gen_time, encode_time, error}.
     This is the big win: 1 lock acquire for N chunks instead of N."""
-    acquired = gpu_lock.acquire(timeout=60)
+    acquired = gpu_lock.acquire(timeout=max(60, len(texts) * 30))
     if not acquired:
         raise HTTPException(status_code=503, detail="GPU busy — all inference slots taken. Please retry.")
 

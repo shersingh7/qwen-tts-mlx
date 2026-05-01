@@ -41,10 +41,11 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     handleTTSRequest(request, sendResponse);
     return true;
   }
-  if (type === "TTS_BATCH_REQUEST") {
-    handleTTSBatchRequest(request, sendResponse);
-    return true;
-  }
+    if (type === "TTS_BATCH_REQUEST") {
+      // Dead code — content.js now fetches directly to avoid MV3 SW lifetime kill
+      sendResponse({ success: false, error: "Deprecated — content.js uses direct fetch." });
+      return true;
+    }
   if (type === "GET_VOICES") {
     handleGetVoices(request, sendResponse);
     return true;
@@ -309,42 +310,12 @@ async function handleTTSRequest(request, sendResponse) {
   }
 }
 
-// ── Batch TTS (content.js page selection) ────────────────────────
+// ── Batch TTS — DEAD CODE (content.js fetches directly now) ──────
+// async function handleTTSBatchRequest(request, sendResponse) {
+//   try {
+//     ...
+//     keep function body here until fully tested, but it's disconnected from the router.
+// }
 async function handleTTSBatchRequest(request, sendResponse) {
-  try {
-    const serverOk = await ensureServerRunning();
-    if (!serverOk) {
-      sendResponse({ success: false, error: "Server not running or failed to start.", serverDown: true });
-      return;
-    }
-
-    const body = {
-      texts: request.texts,
-      voice: request.voice,
-      speed: request.speed,
-      language: request.language || "Auto",
-      format: "wav",
-    };
-    if (request.model) body.model = request.model;
-
-    const response = await fetchWithRetry(`${SERVER_URL}/v1/synthesize-batch`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      timeoutMs: 300000,
-    });
-
-    if (!response.ok) {
-      const maybeJson = await response.json().catch(() => ({}));
-      throw new Error(maybeJson?.detail || `Server error ${response.status}`);
-    }
-
-    markServerKnownRunning();
-    const json = await response.json();
-    sendResponse({ success: true, results: json.results, total_time: json.total_time, error_count: json.error_count });
-  } catch (error) {
-    console.error("[Open TTS Background] Batch error:", error);
-    markServerUnknown();
-    sendResponse({ success: false, error: error.message });
-  }
+  sendResponse({ success: false, error: "Deprecated — content.js uses direct fetch." });
 }

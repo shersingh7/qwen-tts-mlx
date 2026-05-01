@@ -3,12 +3,20 @@ let selectedText = "";
 let speakRunId = 0;
 let isSpeaking = false;
 let isPaused = false;
-let audioQueue = [];
-let audioIndex = 0;
 let currentAbortController = null;
+
+// Web Audio API — required because Chrome blocks <audio>.play() in content scripts
+// when the user gesture has expired (which it has after the 5-30 second generation).
+let audioCtx = null;
+let nextStartTime = 0;
+let activeSources = new Set();
+let scheduledCount = 0;
+let endedCount = 0;
+let onAllDone = null;
 
 const MAX_SELECTION_CHARS = 200000;
 const CHUNK_TARGET_CHARS = 4000;
+const AUDIO_START_LEAD = 0.05; // seconds of lead-in between chunks
 const SERVER_URL = "http://127.0.0.1:8000";
 
 // ─── Widget ──────────────────────────────────────────────────────
@@ -87,16 +95,98 @@ function flashError(message) {
   setTimeout(() => { widget?.classList.remove("error"); setLabel("Speak"); }, 3000);
 }
 
-// ─── Audio cleanup ───────────────────────────────────────────────
+// ─── Audio: Web Audio API (Chrome autoplay-safe) ─────────────────
+
+function getAudioContext() {
+  if (!audioCtx || audioCtx.state === "closed") {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  return audioCtx;
+}
+
+function closeAudioContext() {
+  for (const src of activeSources) {
+    try { src.stop(); } catch (e) {}
+    try { src.disconnect(); } catch (e) {}
+  }
+  activeSources.clear();
+  scheduledCount = 0;
+  endedCount = 0;
+  if (onAllDone) { onAllDone = null; }
+  if (audioCtx && audioCtx.state !== "closed") {
+    audioCtx.close().catch(() => {});
+    audioCtx = null;
+  }
+  nextStartTime = 0;
+}
 
 function stopAllAudio() {
   currentAbortController?.abort();
   currentAbortController = null;
-  for (const a of audioQueue) {
-    try { a.pause(); a.src = ""; a.load(); } catch (e) {}
+  closeAudioContext();
+}
+
+async function decodeAudioChunk(base64) {
+  const binaryStr = atob(base64);
+  const bytes = new Uint8Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+  const ctx = getAudioContext();
+  return ctx.decodeAudioData(bytes.buffer.slice(0));
+}
+
+function scheduleAllBuffers(audioBuffers, playbackRate) {
+  const ctx = getAudioContext();
+  // Resume if browser suspended the context (e.g. in background)
+  if (ctx.state === "suspended") {
+    ctx.resume();
   }
-  audioQueue = [];
-  audioIndex = 0;
+
+  scheduledCount = 0;
+  endedCount = 0;
+  nextStartTime = Math.max(nextStartTime, ctx.currentTime) + AUDIO_START_LEAD;
+
+  const currentRunId = speakRunId;
+
+  onAllDone = () => {
+    if (currentRunId !== speakRunId) return;
+    isSpeaking = false;
+    isPaused = false;
+    setBusy(false, "Speak");
+    closeAudioContext();
+  };
+
+  for (let i = 0; i < audioBuffers.length; i++) {
+    const buf = audioBuffers[i];
+    if (!buf) continue;
+
+    const source = ctx.createBufferSource();
+    source.buffer = buf;
+    source.playbackRate.value = playbackRate;
+    source.connect(ctx.destination);
+
+    source.start(nextStartTime);
+    nextStartTime += buf.duration / playbackRate;
+
+    activeSources.add(source);
+    scheduledCount++;
+
+    source.onended = () => {
+      activeSources.delete(source);
+      endedCount++;
+      if (endedCount >= scheduledCount && onAllDone) {
+        const cb = onAllDone;
+        onAllDone = null;
+        cb();
+      }
+    };
+  }
+
+  // Edge case: every buffer was null — fire done immediately
+  if (scheduledCount === 0 && onAllDone) {
+    const cb = onAllDone;
+    onAllDone = null;
+    cb();
+  }
 }
 
 // ─── Text splitting ────────────────────────────────────────────
@@ -160,7 +250,6 @@ function splitTextForTTS(text, maxChars = CHUNK_TARGET_CHARS) {
 // ─── Server communication (direct fetch — bypasses service worker) ─
 
 async function ensureServerRunning() {
-  // Fast path: direct health check (no service worker involved)
   try {
     const r = await fetch(`${SERVER_URL}/health`, {
       signal: AbortSignal.timeout(2000),
@@ -168,23 +257,17 @@ async function ensureServerRunning() {
     if (r.ok) {
       const d = await r.json();
       if (d.model_loaded) return true;
-      // Server up but model warming — give it a moment
       await new Promise(r => setTimeout(r, 1500));
       return true;
     }
   } catch {}
 
-  // Ask background to start server (short-lived message, SW won't die)
   let started = false;
   try {
     const r = await chrome.runtime.sendMessage({ type: "ENSURE_SERVER" });
     if (r?.success) started = true;
-  } catch {
-    // If SW is dead, try direct start via native host isn't possible from content.
-    // We'll retry health check a few times in case another tab's popup started it.
-  }
+  } catch {}
 
-  // Poll health directly until ready (or timeout)
   for (let i = 0; i < (started ? 40 : 6); i++) {
     await new Promise(r => setTimeout(r, 1000));
     try {
@@ -226,58 +309,6 @@ async function synthesizeBatchDirect(texts, settings, signal) {
   return response.json();
 }
 
-// ─── Playback ────────────────────────────────────────────────────
-
-function playNextChunk(runId) {
-  if (runId !== speakRunId) return;
-  if (audioIndex >= audioQueue.length) {
-    isSpeaking = false;
-    isPaused = false;
-    setBusy(false, "Speak");
-    return;
-  }
-
-  const audio = audioQueue[audioIndex];
-  if (!audio) {
-    audioIndex++;
-    playNextChunk(runId);
-    return;
-  }
-
-  const onEnded = () => {
-    cleanup();
-    audioIndex++;
-    setTimeout(() => playNextChunk(runId), 50);
-  };
-
-  const onError = () => {
-    cleanup();
-    console.error("[Open TTS] Audio error chunk", audioIndex);
-    audioIndex++;
-    setTimeout(() => playNextChunk(runId), 50);
-  };
-
-  function cleanup() {
-    audio.removeEventListener("ended", onEnded);
-    audio.removeEventListener("error", onError);
-  }
-
-  audio.addEventListener("ended", onEnded);
-  audio.addEventListener("error", onError);
-
-  audio.play().catch(err => {
-    console.error("[Open TTS] Play failed:", err);
-    cleanup();
-    audioIndex++;
-    setTimeout(() => playNextChunk(runId), 50);
-  });
-
-  const remaining = audioQueue.length - audioIndex;
-  setBusy(true, remaining > 1
-    ? `Reading ${audioIndex + 1}/${audioQueue.length}... tap to stop`
-    : "Reading... tap to stop");
-}
-
 // ─── Main speak handler ─────────────────────────────────────────
 
 async function onSpeakClick(event) {
@@ -289,28 +320,29 @@ async function onSpeakClick(event) {
 
   // Toggle: pause / resume / stop
   if (isSpeaking) {
-    const currentAudio = audioQueue[audioIndex];
-    if (currentAudio && !currentAudio.paused && !isPaused) {
-      currentAudio.pause();
-      isPaused = true;
-      widget?.classList.add("paused");
-      setBusy(true, "Paused — tap to resume");
-      return;
-    }
-    if (currentAudio && isPaused) {
-      currentAudio.play().catch(() => {});
+    // Already paused — resume
+    if (isPaused) {
+      if (audioCtx?.state === "suspended") audioCtx.resume();
       isPaused = false;
       widget?.classList.remove("paused");
       setBusy(true, "Reading... tap to stop");
       return;
     }
-    // Full stop
+    // Still playing — pause
+    if (scheduledCount > 0 && endedCount < scheduledCount) {
+      if (audioCtx?.state === "running") audioCtx.suspend();
+      isPaused = true;
+      widget?.classList.add("paused");
+      setBusy(true, "Paused — tap to resume");
+      return;
+    }
+    // Finished or nothing scheduled — full stop
     speakRunId++;
     isSpeaking = false;
     isPaused = false;
     widget?.classList.remove("paused");
     stopAllAudio();
-    setBusy(false, "Stopped");
+    setBusy(false, "Speak");
     return;
   }
 
@@ -321,6 +353,13 @@ async function onSpeakClick(event) {
   currentAbortController = new AbortController();
 
   try {
+    // CRITICAL: create AudioContext now while the user gesture is active.
+    // Chrome allows AudioContext.start() during a click; it blocks .play()
+    // on <audio> elements whose user gesture has expired (which ours has
+    // after the 5-30 second generation).
+    const ctx = getAudioContext();
+    if (ctx.state === "suspended") await ctx.resume().catch(() => {});
+
     setBusy(true, "Preparing...");
 
     const chunks = splitTextForTTS(text, CHUNK_TARGET_CHARS);
@@ -329,53 +368,49 @@ async function onSpeakClick(event) {
     const settings = await chrome.storage.sync.get(["voice", "speed", "language", "model"]);
     const playbackRate = Number(settings.speed) || 1.0;
 
-    // Ensure server is running (fast, service-worker-safe)
     const serverOk = await ensureServerRunning();
     if (!serverOk) throw new Error("Server not running — start it from the popup");
 
-    // DIRECT FETCH — bypasses service worker completely. No "context invalidated".
     setBusy(true, `Generating ${chunks.length} chunk(s)...`);
     const batchResult = await synthesizeBatchDirect(chunks, settings, currentAbortController.signal);
 
-    if (runId !== speakRunId) return; // user stopped while generating
+    if (runId !== speakRunId) return;
 
     const results = batchResult.results || [];
     if (!results.length) throw new Error("No audio returned");
 
-    // Build Audio elements from base64 responses
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i];
-      if (r.error) {
-        console.warn(`[Open TTS] Chunk ${i} error:`, r.error);
-        continue;
+    setBusy(true, "Loading audio...");
+
+    // Decode all base64 responses into AudioBuffers (parallel)
+    const decodePromises = results.map(async (r, i) => {
+      if (r.error || !r.audio_base64) return null;
+      try {
+        return await decodeAudioChunk(r.audio_base64);
+      } catch (e) {
+        console.error(`[Open TTS] Decode error chunk ${i}:`, e);
+        return null;
       }
-      if (!r.audio_base64) continue;
+    });
+    const audioBuffers = (await Promise.all(decodePromises)).filter(Boolean);
 
-      const mime = r.mime_type || "audio/wav";
-      const dataUrl = `data:${mime};base64,${r.audio_base64}`;
-      const audio = new Audio(dataUrl);
-      audio.playbackRate = playbackRate;
-      audio.preservesPitch = true;
-      audioQueue.push(audio);
-    }
+    if (!audioBuffers.length) throw new Error("No playable audio generated");
 
-    if (!audioQueue.length) {
-      throw new Error("No playable audio generated");
-    }
+    // Schedule all chunks for gapless playback via the Web Audio graph.
+    // This survives Chrome's autoplay policy because the AudioContext
+    // was created during the user click gesture.
+    scheduleAllBuffers(audioBuffers, playbackRate);
 
-    // Start sequential playback
-    audioIndex = 0;
-    playNextChunk(runId);
+    setBusy(true, audioBuffers.length > 1
+      ? `Reading 1/${audioBuffers.length}... tap to stop`
+      : "Reading... tap to stop");
 
   } catch (error) {
-    if (error.name === "AbortError") {
-      // User clicked stop — not a real error
-      return;
-    }
+    if (error.name === "AbortError") return;
     console.error("[Open TTS] Error:", error);
     if (runId === speakRunId) flashError(error?.message || "Couldn't read. Tap again");
     isSpeaking = false;
     isPaused = false;
+    stopAllAudio();
   } finally {
     currentAbortController = null;
   }
