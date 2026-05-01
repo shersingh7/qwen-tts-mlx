@@ -18,9 +18,6 @@ const MAX_SELECTION_CHARS = 200000;
 const CHUNK_TARGET_CHARS = 4000; // Bumped from 2000 -- fewer chunks = fewer round-trips
 const STREAM_THRESHOLD_CHARS = 0; // Always stream -- first audio in ~250ms instead of waiting for full generation
 
-// Batch callback registry — keyed by batchId
-window._batchCallbacks = window._batchCallbacks || {};
-
 // ---------------------------------------------------------------------------
 // Widget
 // ---------------------------------------------------------------------------
@@ -278,29 +275,6 @@ function requestStreamAudio(text, settings, chunkIndex) {
 }
 
 // ---------------------------------------------------------------------------
-// Batch audio request — single HTTP call for ALL chunks (Phase 7)
-// ---------------------------------------------------------------------------
-
-function requestBatchAudio(texts, settings, batchId) {
-  return new Promise((resolve, reject) => {
-    window._batchCallbacks[batchId] = (err, result) => {
-      if (err) reject(err);
-      else resolve(result);
-    };
-
-    chrome.runtime.sendMessage({
-      type: "TTS_BATCH_REQUEST",
-      texts,
-      voice: settings.voice || "ryan",
-      speed: settings.speed || 1.0,
-      language: settings.language || "Auto",
-      model: settings.model || "qwen3-tts",
-      batchId,
-    });
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Web Audio API gapless scheduling -- reuse AudioContext
 // ---------------------------------------------------------------------------
 
@@ -363,54 +337,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
 
-  // ---- BATCH result from background.js (Phase 7) ----
-  if (message.type === "TTS_BATCH_RESULT") {
-    const { batchId, result } = message;
-    console.log(`[Open TTS] Batch result received: ${result.results.length} items, ${result.total_time}s`);
-    if (window._batchCallbacks && window._batchCallbacks[batchId]) {
-      window._batchCallbacks[batchId](null, result);
-      delete window._batchCallbacks[batchId];
-    }
-    return;
-  }
-
-  if (message.type === "TTS_BATCH_ERROR") {
-    const { batchId, error } = message;
-    console.error(`[Open TTS] Batch error:`, error);
-    if (window._batchCallbacks && window._batchCallbacks[batchId]) {
-      window._batchCallbacks[batchId](new Error(error), null);
-      delete window._batchCallbacks[batchId];
-    }
-    return;
-  }
-
-  // Existing streaming guard — unchanged from original
   if (!activeAudioQueue || !isStreamActive) return;
 
   if (message.type === "TTS_STREAM_CHUNK") {
     const { chunkIndex, audioArrayBuffer, audioBase64, audioMimeType } = message;
 
-    // audioBase64 is the primary path (ArrayBuffer doesn't survive chrome.tabs.sendMessage JSON serialization)
-    let buf = null;
-    if (audioBase64) {
-      try {
-        const binaryStr = atob(audioBase64);
-        const bytes = new Uint8Array(binaryStr.length);
-        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-        buf = bytes.buffer;
-      } catch (e) {
-        console.error("[Open TTS] Base64 decode error:", e);
-        return;
-      }
-    } else if (audioArrayBuffer && audioArrayBuffer.byteLength) {
-      // Only use ArrayBuffer if it actually has data (Chrome drops empty {} as truthy)
-      buf = audioArrayBuffer;
-    }
+    // Prefer raw ArrayBuffer (zero-copy from background.js), fall back to base64
+    const buf = audioArrayBuffer || (audioBase64 ? (() => {
+      const binaryStr = atob(audioBase64);
+      const bytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+      return bytes.buffer;
+    })() : null);
 
-    if (!buf || !(buf instanceof ArrayBuffer) || buf.byteLength === 0) {
-      console.error("[Open TTS] No valid audio data received for chunk", chunkIndex);
-      return;
-    }
+    if (!buf) return;
 
     (async () => {
       try {
@@ -422,7 +362,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (dur > 0) console.log(`[Open TTS] Scheduled sub-chunk: ${dur.toFixed(1)}s (chunk ${chunkIndex}${audioMimeType ? `, ${audioMimeType}` : ''})`);
       } catch (e) {
         console.error("[Open TTS] Stream decode error:", e);
-        activeAudioQueue.markChunkComplete(chunkIndex);  // unblock waiter on error
       }
     })();
 
@@ -458,7 +397,7 @@ document.addEventListener("mousedown", (e) => {
 });
 
 // ---------------------------------------------------------------------------
-// Main speak handler
+// Main speak handler -- ALWAYS uses streaming for instant first-audio
 // ---------------------------------------------------------------------------
 
 async function onSpeakClick(event) {
@@ -528,104 +467,43 @@ async function onSpeakClick(event) {
     queue.totalChunks = chunks.length;
     console.log(`[Open TTS] ${chunks.length} chunk(s), ${text.length} chars, speed: ${playbackRate}x`);
 
-    // ---- BATCH path for 2+ chunks (Phase 7): single HTTP call, single gpu_lock ----
-    if (chunks.length >= 2) {
-      isStreamActive = true;
+    // ---- ALWAYS STREAM ----
+    // Even for short text, streaming gives first-audio in ~250ms
+    // vs 5+ seconds waiting for full generation in non-streaming mode
+    isStreamActive = true;
 
-      const batchId = `batch-${runId}-${Date.now()}`;
-      let batchResult;
+    for (let i = 0; i < chunks.length; i++) {
+      if (runId !== speakRunId || queue.isStopped) return;
+
+      setBusy(true, `Generating ${i + 1}/${chunks.length}...`);
+
+      // Start streaming for this chunk
+      requestStreamAudio(chunks[i], settings, i);
+
+      // Wait for this chunk's stream to complete
       try {
-        batchResult = await requestBatchAudio(chunks, settings, batchId);
-      } catch (err) {
-        throw new Error(`Batch generation failed: ${err.message}`);
+        await queue.waitForChunk(i);
+      } catch (e) {
+        if (queue.isStopped) return;
+        throw e;
       }
 
       if (runId !== speakRunId || queue.isStopped) return;
 
-      const totalTime = batchResult.total_time || 0;
-      const errorCount = batchResult.error_count || 0;
-      console.log(`[Open TTS] Batch done in ${totalTime}s, ${errorCount} errors`);
+      setBusy(true, chunks.length > 1 ? `Reading ${i + 1}/${chunks.length}... tap to stop` : "Reading... tap to stop");
 
-      for (const item of batchResult.results || []) {
-        if (runId !== speakRunId || queue.isStopped) return;
-
-        if (item.error) {
-          console.error(`[Open TTS] Batch chunk ${item.index} error: ${item.error}`);
-          queue.markChunkComplete(item.index);
-          continue;
-        }
-
-        if (!item.audio_base64) {
-          queue.markChunkComplete(item.index);
-          continue;
-        }
-
-        setBusy(true, `Reading ${item.index + 1}/${chunks.length}...`);
-
-        try {
-          const binaryStr = atob(item.audio_base64);
-          const bytes = new Uint8Array(binaryStr.length);
-          for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-
-          if (runId !== speakRunId || queue.isStopped) return;
-
-          if (ctx.state === "suspended") await ctx.resume();
-          if (runId !== speakRunId || queue.isStopped) return;
-
-          const audioBuffer = await decodeArrayBufferToAudioBuffer(bytes.buffer);
-          if (runId !== speakRunId || queue.isStopped) return;
-
-          const dur = scheduleAudioBuffer(audioBuffer);
-          console.log(`[Open TTS] Scheduled batch chunk ${item.index}: ${dur.toFixed(1)}s`);
-        } catch (e) {
-          console.error(`[Open TTS] Batch chunk ${item.index} decode error:`, e);
-        }
-
-        queue.markChunkComplete(item.index);
+      // Brief pause to let audio pipeline fill before next chunk request
+      if (i < chunks.length - 1) {
+        await new Promise(r => setTimeout(r, 10));
       }
 
-      // Wait for all audio to finish
-      if (activeSourceCount > 0) {
-        setBusy(true, "Finishing...");
-        await waitForAllAudioToFinish();
-      }
-    } else {
-      // ---- SINGLE-CHUNK streaming path (unchanged from original) ----
-      isStreamActive = true;
+      queue.cleanup(i);
+    }
 
-      for (let i = 0; i < chunks.length; i++) {
-        if (runId !== speakRunId || queue.isStopped) return;
-
-        setBusy(true, `Generating ${i + 1}/${chunks.length}...`);
-
-        // Start streaming for this chunk
-        requestStreamAudio(chunks[i], settings, i);
-
-        // Wait for this chunk's stream to complete
-        try {
-          await queue.waitForChunk(i);
-        } catch (e) {
-          if (queue.isStopped) return;
-          throw e;
-        }
-
-        if (runId !== speakRunId || queue.isStopped) return;
-
-        setBusy(true, chunks.length > 1 ? `Reading ${i + 1}/${chunks.length}... tap to stop` : "Reading... tap to stop");
-
-        // Brief pause to let audio pipeline fill before next chunk request
-        if (i < chunks.length - 1) {
-          await new Promise(r => setTimeout(r, 10));
-        }
-
-        queue.cleanup(i);
-      }
-
-      // All chunks generated and scheduled -- wait for remaining audio to finish
-      if (activeSourceCount > 0) {
-        setBusy(true, "Finishing...");
-        await waitForAllAudioToFinish();
-      }
+    // All chunks generated and scheduled -- wait for remaining audio to finish
+    if (activeSourceCount > 0) {
+      setBusy(true, "Finishing...");
+      await waitForAllAudioToFinish();
     }
 
     if (runId === speakRunId && !queue.isStopped) setBusy(false);
