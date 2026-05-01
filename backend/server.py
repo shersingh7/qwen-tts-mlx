@@ -29,7 +29,7 @@ HOST = os.getenv("OPEN_TTS_HOST", "127.0.0.1")
 PORT = int(os.getenv("OPEN_TTS_PORT", "8000"))
 WARMUP_TEXT = os.getenv("OPEN_TTS_WARMUP_TEXT", "Warmup")
 DEFAULT_MODEL_ID = os.getenv("OPEN_TTS_DEFAULT_MODEL", "qwen3-tts")
-DEFAULT_AUDIO_FORMAT = os.getenv("OPEN_TTS_AUDIO_FORMAT", "opus")
+DEFAULT_AUDIO_FORMAT = os.getenv("OPEN_TTS_AUDIO_FORMAT", "wav")
 OPUS_BITRATE = os.getenv("OPEN_TTS_OPUS_BITRATE", "64k")
 STREAMING_INTERVAL = float(os.getenv("OPEN_TTS_STREAMING_INTERVAL", "0.25"))
 # Maximum seconds a single generation call can run before timeout

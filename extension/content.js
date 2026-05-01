@@ -3,12 +3,13 @@ let selectedText = "";
 let speakRunId = 0;
 let isSpeaking = false;
 let isPaused = false;
-let audioQueue = [];          // Array of Audio elements (sequential playback)
-let audioIndex = 0;           // Index of currently playing chunk
-let pendingCount = 0;         // How many chunks are still generating
+let audioQueue = [];
+let audioIndex = 0;
+let currentAbortController = null;
 
 const MAX_SELECTION_CHARS = 200000;
 const CHUNK_TARGET_CHARS = 4000;
+const SERVER_URL = "http://127.0.0.1:8000";
 
 // ─── Widget ──────────────────────────────────────────────────────
 
@@ -89,12 +90,13 @@ function flashError(message) {
 // ─── Audio cleanup ───────────────────────────────────────────────
 
 function stopAllAudio() {
+  currentAbortController?.abort();
+  currentAbortController = null;
   for (const a of audioQueue) {
-    try { a.pause(); a.src = ""; } catch (e) {}
+    try { a.pause(); a.src = ""; a.load(); } catch (e) {}
   }
   audioQueue = [];
   audioIndex = 0;
-  pendingCount = 0;
 }
 
 // ─── Text splitting ────────────────────────────────────────────
@@ -155,17 +157,83 @@ function splitTextForTTS(text, maxChars = CHUNK_TARGET_CHARS) {
   return out;
 }
 
+// ─── Server communication (direct fetch — bypasses service worker) ─
+
+async function ensureServerRunning() {
+  // Fast path: direct health check (no service worker involved)
+  try {
+    const r = await fetch(`${SERVER_URL}/health`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (r.ok) {
+      const d = await r.json();
+      if (d.model_loaded) return true;
+      // Server up but model warming — give it a moment
+      await new Promise(r => setTimeout(r, 1500));
+      return true;
+    }
+  } catch {}
+
+  // Ask background to start server (short-lived message, SW won't die)
+  let started = false;
+  try {
+    const r = await chrome.runtime.sendMessage({ type: "ENSURE_SERVER" });
+    if (r?.success) started = true;
+  } catch {
+    // If SW is dead, try direct start via native host isn't possible from content.
+    // We'll retry health check a few times in case another tab's popup started it.
+  }
+
+  // Poll health directly until ready (or timeout)
+  for (let i = 0; i < (started ? 40 : 6); i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const r = await fetch(`${SERVER_URL}/health`, {
+        signal: AbortSignal.timeout(2000),
+      });
+      if (r.ok) {
+        const d = await r.json();
+        if (d.model_loaded) return true;
+      }
+    } catch {}
+  }
+
+  return false;
+}
+
+async function synthesizeBatchDirect(texts, settings, signal) {
+  const body = {
+    texts,
+    voice: settings.voice || "ryan",
+    speed: Number(settings.speed) || 1.0,
+    language: settings.language || "Auto",
+    format: "wav",
+  };
+  if (settings.model) body.model = settings.model;
+
+  const response = await fetch(`${SERVER_URL}/v1/synthesize-batch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: signal || AbortSignal.timeout(300000),
+  });
+
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.detail || `Server error ${response.status}`);
+  }
+
+  return response.json();
+}
+
 // ─── Playback ────────────────────────────────────────────────────
 
 function playNextChunk(runId) {
   if (runId !== speakRunId) return;
   if (audioIndex >= audioQueue.length) {
-    // All done
-    if (pendingCount === 0) {
-      isSpeaking = false;
-      isPaused = false;
-      setBusy(false, "Speak");
-    }
+    isSpeaking = false;
+    isPaused = false;
+    setBusy(false, "Speak");
     return;
   }
 
@@ -177,55 +245,37 @@ function playNextChunk(runId) {
   }
 
   const onEnded = () => {
-    audio.removeEventListener("ended", onEnded);
-    audio.removeEventListener("error", onError);
+    cleanup();
     audioIndex++;
-    playNextChunk(runId);
+    setTimeout(() => playNextChunk(runId), 50);
   };
 
   const onError = () => {
-    audio.removeEventListener("ended", onEnded);
-    audio.removeEventListener("error", onError);
+    cleanup();
     console.error("[Open TTS] Audio error chunk", audioIndex);
     audioIndex++;
-    playNextChunk(runId);
+    setTimeout(() => playNextChunk(runId), 50);
   };
+
+  function cleanup() {
+    audio.removeEventListener("ended", onEnded);
+    audio.removeEventListener("error", onError);
+  }
 
   audio.addEventListener("ended", onEnded);
   audio.addEventListener("error", onError);
 
   audio.play().catch(err => {
     console.error("[Open TTS] Play failed:", err);
+    cleanup();
     audioIndex++;
-    playNextChunk(runId);
+    setTimeout(() => playNextChunk(runId), 50);
   });
 
-  setBusy(true, audioIndex + 1 < audioQueue.length || pendingCount > 0
-    ? `Reading ${audioIndex + 1}/${Math.max(audioQueue.length, audioIndex + 1 + pendingCount)}... tap to stop`
+  const remaining = audioQueue.length - audioIndex;
+  setBusy(true, remaining > 1
+    ? `Reading ${audioIndex + 1}/${audioQueue.length}... tap to stop`
     : "Reading... tap to stop");
-}
-
-// ─── Batch request ──────────────────────────────────────────────
-
-async function requestBatchAudio(texts, settings) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({
-      type: "TTS_BATCH_REQUEST",
-      texts,
-      voice: settings.voice || "ryan",
-      speed: settings.speed || 1.0,
-      language: settings.language || "Auto",
-      model: settings.model || "qwen3-tts",
-    }, (response) => {
-      const err = chrome.runtime.lastError;
-      if (err) {
-        reject(new Error(err.message));
-        return;
-      }
-      if (response?.success) resolve(response);
-      else reject(new Error(response?.error || "TTS request failed"));
-    });
-  });
 }
 
 // ─── Main speak handler ─────────────────────────────────────────
@@ -237,7 +287,7 @@ async function onSpeakClick(event) {
   const text = selectedText?.trim();
   if (!text) return;
 
-  // Stop / pause / resume logic
+  // Toggle: pause / resume / stop
   if (isSpeaking) {
     const currentAudio = audioQueue[audioIndex];
     if (currentAudio && !currentAudio.paused && !isPaused) {
@@ -268,27 +318,26 @@ async function onSpeakClick(event) {
   isSpeaking = true;
   isPaused = false;
   stopAllAudio();
+  currentAbortController = new AbortController();
 
   try {
     setBusy(true, "Preparing...");
 
-    const serverReady = chrome.runtime.sendMessage({ type: "ENSURE_SERVER" }).catch(() => null);
-    const settings = await chrome.storage.sync.get(["voice", "speed", "language", "model"]);
-    const playbackRate = Number(settings.speed) || 1.0;
-
     const chunks = splitTextForTTS(text, CHUNK_TARGET_CHARS);
     if (!chunks.length) throw new Error("Nothing to read");
 
-    await serverReady;
-    pendingCount = chunks.length;
+    const settings = await chrome.storage.sync.get(["voice", "speed", "language", "model"]);
+    const playbackRate = Number(settings.speed) || 1.0;
 
-    // Single HTTP call for all chunks — one gpu_lock on server
+    // Ensure server is running (fast, service-worker-safe)
+    const serverOk = await ensureServerRunning();
+    if (!serverOk) throw new Error("Server not running — start it from the popup");
+
+    // DIRECT FETCH — bypasses service worker completely. No "context invalidated".
     setBusy(true, `Generating ${chunks.length} chunk(s)...`);
-    const batchResult = await requestBatchAudio(chunks, settings);
+    const batchResult = await synthesizeBatchDirect(chunks, settings, currentAbortController.signal);
 
-    pendingCount = 0;
-
-    if (runId !== speakRunId) return; // user stopped
+    if (runId !== speakRunId) return; // user stopped while generating
 
     const results = batchResult.results || [];
     if (!results.length) throw new Error("No audio returned");
@@ -302,7 +351,7 @@ async function onSpeakClick(event) {
       }
       if (!r.audio_base64) continue;
 
-      const mime = r.mime_type || "audio/ogg";
+      const mime = r.mime_type || "audio/wav";
       const dataUrl = `data:${mime};base64,${r.audio_base64}`;
       const audio = new Audio(dataUrl);
       audio.playbackRate = playbackRate;
@@ -319,11 +368,16 @@ async function onSpeakClick(event) {
     playNextChunk(runId);
 
   } catch (error) {
+    if (error.name === "AbortError") {
+      // User clicked stop — not a real error
+      return;
+    }
     console.error("[Open TTS] Error:", error);
     if (runId === speakRunId) flashError(error?.message || "Couldn't read. Tap again");
     isSpeaking = false;
     isPaused = false;
-    pendingCount = 0;
+  } finally {
+    currentAbortController = null;
   }
 }
 
