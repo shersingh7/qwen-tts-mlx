@@ -1,4 +1,4 @@
-// Open TTS — Content Script (v2.2)
+// Open TTS — Content Script (v2.2.1)
 // Handles the "Speak" floating widget on selected text.
 // Offscreen document lifecycle is managed by background.js —
 // content scripts don't have access to chrome.offscreen API.

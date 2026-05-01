@@ -605,6 +605,11 @@ async function refreshHealth() {
 }
 
 async function stopAllTabsTTS() {
+  // Stop offscreen audio playback via background.js
+  try {
+    await runtimeMessage({ type: "STOP_TTS" });
+  } catch (e) {}
+  // Also stop content script state in all tabs
   try {
     const tabs = await chrome.tabs.query({});
     for (const tab of tabs) {

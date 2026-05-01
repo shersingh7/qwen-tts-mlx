@@ -1,3 +1,4 @@
+// Open TTS — Background Service Worker (v2.2.1)
 const SERVER_URL = "http://127.0.0.1:8000";
 const NATIVE_HOST_NAME = "com.open_tts.native_host";
 
@@ -78,11 +79,22 @@ async function sendToOffscreen(payload) {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   const type = request.type;
 
+  // Prevent re-processing our own forwarded messages.
+  // When background.js forwards SPEAK/STOP/PAUSE/RESUME via
+  // chrome.runtime.sendMessage, our own listener would see it again.
+  if (request._fromBackground) {
+    // This is our own forwarded message — don't re-route it.
+    // Let it propagate to offscreen.js (the intended destination).
+    return false;
+  }
+
   // SPEAK / STOP / PAUSE / RESUME — route through offscreen doc.
   // Content scripts send these; background creates offscreen doc
   // and forwards. We handle the lifecycle HERE, not in content.js.
   if (["SPEAK", "STOP", "PAUSE", "RESUME"].includes(type)) {
-    sendToOffscreen(request)
+    // Stamp the message so we don't re-process it on broadcast
+    const forwarded = { ...request, _fromBackground: true };
+    sendToOffscreen(forwarded)
       .then((resp) => sendResponse(resp || { started: true }))
       .catch((e) => sendResponse({ error: e.message }));
     return true;
@@ -90,7 +102,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   // Popup requested global stop — tell offscreen + all content tabs
   if (type === "STOP_TTS") {
-    sendToOffscreen({ type: "STOP" }).catch(() => {});
+    sendToOffscreen({ type: "STOP", _fromBackground: true }).catch(() => {});
     // Also notify content scripts in all tabs
     chrome.tabs.query({}).then((tabs) => {
       for (const tab of tabs) {

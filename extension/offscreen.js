@@ -1,4 +1,4 @@
-// Open TTS — Offscreen Document (v2.2)
+// Open TTS — Offscreen Document (v2.2.1)
 // Runs at chrome-extension:// origin = autoplay always allowed.
 // Handles full synthesis + Web Audio playback.
 // Speed is applied at synthesis time by the server — we do NOT re-apply
@@ -99,7 +99,30 @@ async function ensureServer() {
     if (!r.ok) return false;
     const d = await r.json();
     return !!d.model_loaded;
-  } catch (_) { return false; }
+  } catch (_) {
+    // Server not responding — ask background.js to start it
+    try {
+      const startResult = await new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: "ENSURE_SERVER" }, (resp) => {
+          resolve(resp);
+        });
+      });
+      if (startResult?.success) {
+        // Wait for server to be ready (up to 30s)
+        for (let i = 0; i < 60; i++) {
+          await new Promise(r => setTimeout(r, 500));
+          try {
+            const r = await fetch(`${SERVER_URL}/health`, { signal: AbortSignal.timeout(2000) });
+            if (r.ok) {
+              const d = await r.json();
+              if (d.model_loaded) return true;
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+    return false;
+  }
 }
 
 async function synthBatch(texts, voice, speed, lang, model, signal) {
