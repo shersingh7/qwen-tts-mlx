@@ -433,11 +433,12 @@ async function handleTTSStreamRequest(request, sender) {
     if (fallbackHeader === "non-streaming") {
       const contentType = response.headers.get("content-type") || "audio/ogg";
       const arrayBuffer = await response.arrayBuffer();
+      const base64 = arrayBufferToBase64(arrayBuffer);
 
       chrome.tabs.sendMessage(tabId, {
         type: "TTS_STREAM_CHUNK",
         chunkIndex: request.chunkIndex,
-        audioArrayBuffer: arrayBuffer,
+        audioBase64: base64,
         audioMimeType: contentType,
       });
 
@@ -509,11 +510,15 @@ async function handleTTSStreamRequest(request, sender) {
         const wavData = buffer.slice(offset, offset + wavSize);
         offset += wavSize;
 
+        const base64 = arrayBufferToBase64(
+          wavData.buffer.slice(wavData.byteOffset,
+                               wavData.byteOffset + wavData.byteLength)
+        );
+
         chrome.tabs.sendMessage(tabId, {
           type: "TTS_STREAM_CHUNK",
           chunkIndex: request.chunkIndex,
-          audioArrayBuffer: wavData.buffer.slice(wavData.byteOffset,
-                             wavData.byteOffset + wavData.byteLength),
+          audioBase64: base64,
         });
       }
 
@@ -532,11 +537,14 @@ async function handleTTSStreamRequest(request, sender) {
       const startIdx = riffOffset >= 0 ? riffOffset : (buffer[0] === RIFF_MAGIC[0] ? 0 : -1);
       if (startIdx >= 0 && startIdx < buffer.length) {
         const wavData = buffer.slice(startIdx);
+        const base64 = arrayBufferToBase64(
+          wavData.buffer.slice(wavData.byteOffset,
+                               wavData.byteOffset + wavData.byteLength)
+        );
         chrome.tabs.sendMessage(tabId, {
           type: "TTS_STREAM_CHUNK",
           chunkIndex: request.chunkIndex,
-          audioArrayBuffer: wavData.buffer.slice(wavData.byteOffset,
-                             wavData.byteOffset + wavData.byteLength),
+          audioBase64: base64,
         });
       }
     }

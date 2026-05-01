@@ -390,15 +390,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "TTS_STREAM_CHUNK") {
     const { chunkIndex, audioArrayBuffer, audioBase64, audioMimeType } = message;
 
-    // Prefer raw ArrayBuffer (zero-copy from background.js), fall back to base64
-    const buf = audioArrayBuffer || (audioBase64 ? (() => {
-      const binaryStr = atob(audioBase64);
-      const bytes = new Uint8Array(binaryStr.length);
-      for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-      return bytes.buffer;
-    })() : null);
+    // audioBase64 is the primary path (ArrayBuffer doesn't survive chrome.tabs.sendMessage JSON serialization)
+    let buf = null;
+    if (audioBase64) {
+      try {
+        const binaryStr = atob(audioBase64);
+        const bytes = new Uint8Array(binaryStr.length);
+        for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+        buf = bytes.buffer;
+      } catch (e) {
+        console.error("[Open TTS] Base64 decode error:", e);
+        return;
+      }
+    } else if (audioArrayBuffer && audioArrayBuffer.byteLength) {
+      // Only use ArrayBuffer if it actually has data (Chrome drops empty {} as truthy)
+      buf = audioArrayBuffer;
+    }
 
-    if (!buf) return;
+    if (!buf || !(buf instanceof ArrayBuffer) || buf.byteLength === 0) {
+      console.error("[Open TTS] No valid audio data received for chunk", chunkIndex);
+      return;
+    }
 
     (async () => {
       try {
@@ -410,6 +422,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (dur > 0) console.log(`[Open TTS] Scheduled sub-chunk: ${dur.toFixed(1)}s (chunk ${chunkIndex}${audioMimeType ? `, ${audioMimeType}` : ''})`);
       } catch (e) {
         console.error("[Open TTS] Stream decode error:", e);
+        activeAudioQueue.markChunkComplete(chunkIndex);  // unblock waiter on error
       }
     })();
 
