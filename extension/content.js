@@ -1,4 +1,4 @@
-// Open TTS — Content Script (v2.2.1)
+// Open TTS — Content Script (v2.3.0)
 // Handles the "Speak" floating widget on selected text.
 // Offscreen document lifecycle is managed by background.js —
 // content scripts don't have access to chrome.offscreen API.
@@ -7,6 +7,7 @@ let widget = null;
 let currentRunId = 0;
 let isSpeaking = false;
 let isPaused = false;
+let savedSelection = "";  // Captured on mouseup, survives mousedown
 
 const MAX_SELECTION_CHARS = 200000;
 
@@ -45,6 +46,15 @@ function createWidget() {
   label.textContent = "Speak";
   container.appendChild(btn);
   container.appendChild(label);
+
+  // CRITICAL FIX: prevent mousedown on the button from clearing the selection.
+  // Without this, the browser deselects text on mousedown, so getSelection()
+  // returns "" by the time click fires — and the speak button does nothing.
+  btn.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
+
   btn.addEventListener("click", onSpeakClick);
   document.body.appendChild(container);
   widget = container;
@@ -56,11 +66,12 @@ function setLabel(text) {
   if (label) label.textContent = text;
 }
 
-function showWidgetAtSelection(text) {
+function showWidgetAtSelection() {
   if (!widget) createWidget();
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0) return;
-  const rect = sel.getRangeAt(0).getBoundingClientRect();
+  // Use saved selection range to position widget — works even if
+  // the user clicked the widget (which would have cleared getSelection)
+  if (!_lastRect) return;
+  const rect = _lastRect;
   const top = Math.max(window.scrollY + 8, window.scrollY + rect.top - 44);
   const left = Math.max(window.scrollX + 8, Math.min(
     window.scrollX + rect.left + rect.width / 2 - 48,
@@ -71,7 +82,7 @@ function showWidgetAtSelection(text) {
   widget.classList.add("visible");
 }
 
-function hideWidget() { widget?.classList.remove("visible"); }
+function hideWidget() { widget?.classList.remove("visible"); savedSelection = ""; }
 function setBusy(b, t) { widget?.classList.toggle("busy", b); setLabel(t || (b ? "Generating..." : "Speak")); }
 
 function flashError(msg) {
@@ -98,7 +109,9 @@ async function onSpeakClick(e) {
   e.preventDefault();
   e.stopPropagation();
 
-  const text = window.getSelection()?.toString().trim() || "";
+  // Use saved selection — NOT window.getSelection() which may be empty
+  // after mousedown on our own button cleared it.
+  const text = savedSelection || window.getSelection()?.toString().trim() || "";
   if (!text) return;
 
   // Toggle off if already playing or pausing
@@ -187,12 +200,26 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
 // ─── Selection events ──────────────────────────────────────
 
+let _lastRect = null;
+
 document.addEventListener("mouseup", () => {
-  const text = window.getSelection()?.toString().trim();
-  if (text) showWidgetAtSelection(text.slice(0, MAX_SELECTION_CHARS));
-  else setTimeout(() => { if (!window.getSelection()?.toString().trim()) hideWidget(); }, 80);
+  const sel = window.getSelection();
+  const text = sel?.toString().trim();
+  if (text) {
+    savedSelection = text.slice(0, MAX_SELECTION_CHARS);
+    if (sel.rangeCount > 0) {
+      _lastRect = sel.getRangeAt(0).getBoundingClientRect();
+    }
+    showWidgetAtSelection();
+  } else {
+    setTimeout(() => {
+      if (!window.getSelection()?.toString().trim()) hideWidget();
+    }, 80);
+  }
 });
 
 document.addEventListener("mousedown", (e) => {
-  if (widget && !widget.contains(e.target)) hideWidget();
+  // Don't hide if clicking our own widget — mousedown is already prevented on the button
+  if (widget && widget.contains(e.target)) return;
+  hideWidget();
 });
